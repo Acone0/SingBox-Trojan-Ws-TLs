@@ -24,7 +24,7 @@ INIT_SYSTEM="" # 将存储 'systemd', 'openrc' 或 'direct'
 SERVICE_FILE="" # 将根据 INIT_SYSTEM 设置
 
 # 脚本元数据
-SCRIPT_VERSION="3.0" # 版本号提升为3.0
+SCRIPT_VERSION="3.0"
 
 # 全局状态变量
 server_ip=""
@@ -445,13 +445,12 @@ _generate_self_signed_cert() {
     local key_path="$3"
 
     _info "正在为 ${domain} 生成自签名证书..."
-    # 使用>/dev/null 2>&1以保持界面清洁
     openssl ecparam -genkey -name prime256v1 -out "$key_path" >/dev/null 2>&1
     openssl req -new -x509 -days 3650 -key "$key_path" -out "$cert_path" -subj "/CN=${domain}" >/dev/null 2>&1
     
     if [ $? -ne 0 ]; then
         _error "为 ${domain} 生成证书失败！"
-        rm -f "$cert_path" "$key_path" # 如果失败，清理不完整的文件
+        rm -f "$cert_path" "$key_path"
         return 1
     fi
     _success "证书 ${cert_path} 和私钥 ${key_path} 已成功生成。"
@@ -500,23 +499,20 @@ _remove_node_from_yaml() {
 _add_trojan_ws_tls() {
     _info "--- Trojan (WebSocket+TLS) 设置向导 ---"
     
-    # 步骤 1: 获取连接地址 (用于 server 字段)
+    # 步骤 1: 获取连接地址
     _info "请输入客户端用于“连接”的地址:"
     _info "  - (推荐) 直接回车, 使用VPS的公网 IP: ${server_ip}"
-    _info "  - (其他)   您也可以手动输入一个IP或域名 (例如：xxx.123456.xyz)"
+    _info "  - (其他)   您也可以手动输入一个IP或域名"
     read -p "请输入连接地址 (默认: ${server_ip}): " connection_address
     
-    # 如果用户回车，则使用 $server_ip，否则使用用户输入的值
     local client_server_addr=${connection_address:-$server_ip}
     
-    # 如果用的是IP，且是IPv6，自动加上方括号
     if [[ "$client_server_addr" == *":"* ]] && [[ "$client_server_addr" != "["* ]]; then
          client_server_addr="[${client_server_addr}]"
     fi
 
-    # 步骤 2: 获取伪装域名 (用于 SNI 和 Host)
-    _info "请输入您的“伪装域名”，这个域名必须是您证书对应的域名。"
-    _info " (例如: xxx.987654.xyz)"
+    # 步骤 2: 获取伪装域名
+    _info "请输入您的“伪装域名”，必须是证书对应的域名。"
     read -p "请输入伪装域名: " camouflage_domain
     [[ -z "$camouflage_domain" ]] && _error "伪装域名不能为空" && return 1
 
@@ -542,8 +538,6 @@ _add_trojan_ws_tls() {
 
     # 步骤 6: 证书文件
     _info "请输入 ${camouflage_domain} 对应的证书文件路径。"
-    _info "  - (推荐) 使用 acme.sh 签发的 fullchain.pem"
-    _info "  - (或)   使用 Cloudflare 源服务器证书"
     read -p "请输入证书文件 .pem/.crt 的完整路径: " cert_path
     [[ ! -f "$cert_path" ]] && _error "证书文件不存在: ${cert_path}" && return 1
 
@@ -551,17 +545,17 @@ _add_trojan_ws_tls() {
     [[ ! -f "$key_path" ]] && _error "私钥文件不存在: ${key_path}" && return 1
     
     # 步骤 7: 跳过验证
-    read -p "$(echo -e ${YELLOW}"您是否正在使用 Cloudflare 源服务器证书 (或自签名证书)? (y/N): "${NC})" use_origin_cert
+    read -p "$(echo -e ${YELLOW}"是否使用 Cloudflare 源证书或自签名证书? (y/N): "${NC})" use_origin_cert
     local skip_verify=false
     if [[ "$use_origin_cert" == "y" || "$use_origin_cert" == "Y" ]]; then
         skip_verify=true
-        _warning "已启用 'skip-cert-verify: true'。这将跳过证书验证。"
+        _warning "已启用 'skip-cert-verify: true'。"
     fi
 
     local tag="trojan-ws-in-${port}"
     local name="Trojan-WS-${port}"
     
-    # Inbound (服务器端) 配置: 使用 伪装域名 对应的证书
+    # 入站配置
     local inbound_json=$(jq -n \
         --arg t "$tag" \
         --arg p "$port" \
@@ -587,10 +581,7 @@ _add_trojan_ws_tls() {
         }')
     _atomic_modify_json "$CONFIG_FILE" ".inbounds += [$inbound_json]" || return 1
 
-    # Proxy (客户端) 配置: 
-    # server = connection_address (IP 或 域名)
-    # servername = camouflage_domain (证书域名)
-    # Host = camouflage_domain (证书域名)
+    # 代理配置
     local proxy_json=$(jq -n \
             --arg n "$name" \
             --arg s "$client_server_addr" \
@@ -619,10 +610,9 @@ _add_trojan_ws_tls() {
             
     _add_node_to_yaml "$proxy_json"
     _success "Trojan (WebSocket+TLS) 节点添加成功!"
-    _success "客户端连接地址 (server): ${client_server_addr}"
-    _success "客户端伪装域名 (sni/Host): ${camouflage_domain}"
-    _success "客户端密码: ${password}"
-    _success "客户端 UDP 转发已启用。"
+    _success "客户端连接地址: ${client_server_addr}"
+    _success "伪装域名: ${camouflage_domain}"
+    _success "密码: ${password}"
 }
 
 _view_nodes() {
@@ -632,7 +622,6 @@ _view_nodes() {
     jq -c '.inbounds[]' "$CONFIG_FILE" | while read -r node; do
         local tag=$(echo "$node" | jq -r '.tag') type=$(echo "$node" | jq -r '.type') port=$(echo "$node" | jq -r '.listen_port')
         
-        # 优化查找逻辑：优先使用端口匹配
         local proxy_name_to_find=""
         local proxy_obj_by_port=$(${YQ_BINARY} eval '.proxies[] | select(.port == '${port}')' ${CLASH_YAML_FILE} | head -n 1)
 
@@ -640,14 +629,8 @@ _view_nodes() {
              proxy_name_to_find=$(echo "$proxy_obj_by_port" | ${YQ_BINARY} eval '.name' -)
         fi
 
-        # 如果通过端口找不到，则尝试用类型模糊匹配
         if [[ -z "$proxy_name_to_find" ]]; then
-            proxy_name_to_find=$(${YQ_BINARY} eval '.proxies[] | select(.port == '${port}' or .port == 443) | .name' ${CLASH_YAML_FILE} | grep -i "${type}" | head -n 1)
-        fi
-        
-        # 再次降级
-        if [[ -z "$proxy_name_to_find" ]]; then
-             proxy_name_to_find=$(${YQ_BINARY} eval '.proxies[] | select(.port == '${port}' or .port == 443) | .name' ${CLASH_YAML_FILE} | head -n 1)
+            proxy_name_to_find=$(${YQ_BINARY} eval '.proxies[] | select(.port == '${port}' or .port == 443) | .name' ${CLASH_YAML_FILE} | head -n 1)
         fi
 
         local display_server=$(${YQ_BINARY} eval '.proxies[] | select(.name == "'${proxy_name_to_find}'") | .server' ${CLASH_YAML_FILE} | head -n 1)
@@ -658,7 +641,6 @@ _view_nodes() {
         local url=""
         case "$type" in
             "trojan")
-                # Trojan + WS + TLS
                 local password=$(echo "$node" | jq -r '.users[0].password')
                 local server_addr=$(${YQ_BINARY} eval '.proxies[] | select(.name == "'${proxy_name_to_find}'") | .server' ${CLASH_YAML_FILE} | head -n 1)
                 local host_header=$(${YQ_BINARY} eval '.proxies[] | select(.name == "'${proxy_name_to_find}'") | .ws-opts.headers.Host' ${CLASH_YAML_FILE} | head -n 1)
@@ -666,7 +648,6 @@ _view_nodes() {
                 local ws_path=$(echo "$node" | jq -r '.transport.path')
                 local encoded_path=$(_url_encode "$ws_path")
                 
-                # Trojan URL 格式: trojan://password@server:port?params#name
                 local sni_param="&sni=${host_header}"
                 local ws_param="&type=ws&path=${encoded_path}"
                 local host_param="&host=${host_header}"
@@ -723,37 +704,71 @@ _check_config() {
     fi
 }
 
-_update_script() {
-    _info "正在检查脚本更新..."
-    local script_url="https://raw.githubusercontent.com/Acone0/SingBox-Trojan-Ws-TLs/refs/heads/main/singbox2.sh" # 请替换为实际的脚本URL
+# 新增：一键更新 sing-box 程序
+_update_sing_box() {
+    _warning "即将更新 sing-box 程序到最新稳定版..."
+    _warning "当前版本: $(${SINGBOX_BIN} version)"
+    read -p "$(echo -e ${YELLOW}"确定要继续吗? (y/N): "${NC})" confirm
     
-    # 备份当前脚本
-    cp "$SELF_SCRIPT_PATH" "${SELF_SCRIPT_PATH}.backup"
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        _info "更新已取消。"
+        return
+    fi
     
-    # 下载新脚本
-    if wget -qO "${SELF_SCRIPT_PATH}.new" "$script_url"; then
-        # 检查下载是否成功
-        if [ -s "${SELF_SCRIPT_PATH}.new" ]; then
-            # 赋予执行权限
-            chmod +x "${SELF_SCRIPT_PATH}.new"
-            
-            # 替换当前脚本
-            mv "${SELF_SCRIPT_PATH}.new" "$SELF_SCRIPT_PATH"
-            
-            # 清理备份
-            rm -f "${SELF_SCRIPT_PATH}.backup"
-            
-            _success "脚本更新成功！当前版本: v${SCRIPT_VERSION}"
-            _info "请重新运行脚本以使用新版本。"
-            exit 0
+    _info "正在停止 sing-box 服务..."
+    _manage_service "stop"
+    
+    _info "正在备份当前配置文件..."
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.backup"
+    cp "$CLASH_YAML_FILE" "${CLASH_YAML_FILE}.backup"
+    
+    _info "正在下载最新版 sing-box..."
+    local arch=$(uname -m)
+    local arch_tag
+    case $arch in
+        x86_64|amd64) arch_tag='amd64' ;;
+        aarch64|arm64) arch_tag='arm64' ;;
+        armv7l) arch_tag='armv7' ;;
+        *) _error "不支持的架构：$arch"; return 1 ;;
+    esac
+    
+    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+    local download_url=$(curl -s "$api_url" | jq -r ".assets[] | select(.name | contains(\"linux-${arch_tag}.tar.gz\")) | .browser_download_url")
+    
+    if [ -z "$download_url" ]; then
+        _error "无法获取 sing-box 下载链接。"
+        _manage_service "start"
+        return 1
+    fi
+    
+    if wget -qO sing-box.tar.gz "$download_url"; then
+        local temp_dir=$(mktemp -d)
+        tar -xzf sing-box.tar.gz -C "$temp_dir"
+        
+        mv "$temp_dir/sing-box-"*"/sing-box" ${SINGBOX_BIN}
+        chmod +x ${SINGBOX_BIN}
+        
+        rm -rf sing-box.tar.gz "$temp_dir"
+        
+        _success "sing-box 更新成功！"
+        _success "新版本: $(${SINGBOX_BIN} version)"
+        
+        _info "正在检查配置文件兼容性..."
+        if ${SINGBOX_BIN} check -c ${CONFIG_FILE} >/dev/null 2>&1; then
+            _success "配置文件检查通过。"
         else
-            _error "下载的脚本文件为空，更新失败。"
-            mv "${SELF_SCRIPT_PATH}.backup" "$SELF_SCRIPT_PATH"
-            rm -f "${SELF_SCRIPT_PATH}.new"
+            _warning "配置文件可能存在兼容性问题，请检查。"
         fi
+        
+        _info "正在重启 sing-box 服务..."
+        _manage_service "start"
+        
+        _success "sing-box 更新完成！"
     else
-        _error "脚本下载失败，请检查网络连接或脚本URL。"
-        rm -f "${SELF_SCRIPT_PATH}.backup"
+        _error "下载失败，已回滚到旧版本。"
+        mv "${CONFIG_FILE}.backup" "$CONFIG_FILE" 2>/dev/null
+        mv "${CLASH_YAML_FILE}.backup" "$CLASH_YAML_FILE" 2>/dev/null
+        _manage_service "start"
     fi
 }
 
@@ -774,11 +789,11 @@ _main_menu() {
         echo "  6) 查看 sing-box 运行状态"
         echo "  7) 查看 sing-box 实时日志"
         echo "----------------------------------------------------"
-        _info "【脚本与配置】"
+        _info "【更新与维护】"
         echo "  8) 检查配置文件"
-        echo "  9) 卸载 sing-box 及脚本"
-        echo " 10) 更新脚本"
+        echo "  9) 更新 sing-box 程序"
         echo "----------------------------------------------------"
+        echo " 10) 卸载 sing-box 及脚本"
         echo "  0) 退出脚本"
         echo "===================================================="
         read -p "请输入选项 [0-10]: " choice
@@ -792,8 +807,8 @@ _main_menu() {
             6) _manage_service "status" ;;
             7) _view_log ;;
             8) _check_config ;;
-            9) _uninstall ;;
-           10) _update_script ;;
+            9) _update_sing_box ;;
+           10) _uninstall ;;
             0) exit 0 ;;
             *) _error "无效输入，请重试。" ;;
         esac
