@@ -725,7 +725,7 @@ _check_config() {
 
 _update_script() {
     _info "正在检查脚本更新..."
-    local script_url="https://raw.githubusercontent.com/your-repo/sing-box-script/main/singbox.sh" # 请替换为实际的脚本URL
+    local script_url="https://raw.githubusercontent.com/Acone0/SingBox-Trojan-Ws-TLs/refs/heads/main/singbox2.sh" # 请替换为实际的脚本URL
     
     # 备份当前脚本
     cp "$SELF_SCRIPT_PATH" "${SELF_SCRIPT_PATH}.backup"
