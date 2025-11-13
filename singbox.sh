@@ -570,22 +570,13 @@ _check_config() {
 
 # 新增：一键更新 sing-box 程序
 _update_sing_box() {
-    _warning "即将更新 sing-box 程序到最新版本..."
-    _warning "当前版本: $(${SINGBOX_BIN} version)"
-    read -p "$(echo -e ${YELLOW}"确定要继续吗? (y/N): "${NC})" confirm
+    _info "正在检查 sing-box 更新..."
     
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        _info "更新已取消。"
-        return
-    fi
+    # 获取当前版本号
+    local current_version=$(${SINGBOX_BIN} version | head -n1 | sed 's/sing-box version //')
+    _info "当前版本: ${current_version}"
     
-    _info "正在停止 sing-box 服务..."
-    _manage_service "stop"
-    
-    _info "正在备份当前配置文件..."
-    cp "$CONFIG_FILE" "${CONFIG_FILE}.backup"
-    
-    _info "正在下载最新版 sing-box..."
+    # 获取最新版本信息
     local arch=$(uname -m)
     local arch_tag
     case $arch in
@@ -595,18 +586,39 @@ _update_sing_box() {
         *) _error "不支持的架构：$arch"; return 1 ;;
     esac
     
-    # 使用 releases 接口而非 latest，获取最新版本（包括预发行版）
     local api_url="https://api.github.com/repos/SagerNet/sing-box/releases"
     local release_info=$(curl -s "$api_url" | jq -r '.[0]')
-    local version=$(echo "$release_info" | jq -r '.tag_name')
+    local latest_version=$(echo "$release_info" | jq -r '.tag_name' | sed 's/^v//')
     local is_prerelease=$(echo "$release_info" | jq -r '.prerelease')
     
     if [ "$is_prerelease" == "true" ]; then
-        _warning "检测到最新版本为预发行版: ${version}"
+        _info "最新版本: ${latest_version} (预发行版)"
     else
-        _info "检测到最新版本: ${version}"
+        _info "最新版本: ${latest_version}"
     fi
     
+    # 版本对比
+    if [ "$current_version" = "$latest_version" ]; then
+        _success "当前已是最新版本，无需更新。"
+        return 0
+    fi
+    
+    # 检查新版本是否大于当前版本
+    if printf '%s\n%s\n' "$current_version" "$latest_version" | sort -V -C; then
+        _success "发现新版本: ${latest_version}"
+    else
+        _success "当前已是最新版本，无需更新。"
+        return 0
+    fi
+    
+    # 开始更新
+    _info "正在停止 sing-box 服务..."
+    _manage_service "stop"
+    
+    _info "正在备份当前配置文件..."
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.backup"
+    
+    _info "正在下载新版本..."
     local download_url=$(echo "$release_info" | jq -r ".assets[] | select(.name | contains(\"linux-${arch_tag}.tar.gz\")) | .browser_download_url")
     
     if [ -z "$download_url" ]; then
@@ -625,7 +637,7 @@ _update_sing_box() {
         rm -rf sing-box.tar.gz "$temp_dir"
         
         _success "sing-box 更新成功！"
-        _success "新版本: $(${SINGBOX_BIN} version)"
+        _info "新版本: $(${SINGBOX_BIN} version | head -n1)"
         
         _info "正在检查配置文件兼容性..."
         if ${SINGBOX_BIN} check -c ${CONFIG_FILE} >/dev/null 2>&1; then
