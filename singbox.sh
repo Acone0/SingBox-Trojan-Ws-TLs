@@ -12,7 +12,6 @@ NC='\033[0m' # No Color
 SINGBOX_BIN="/usr/local/bin/sing-box"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="${SINGBOX_DIR}/config.json"
-CLASH_YAML_FILE="${SINGBOX_DIR}/clash.yaml"
 METADATA_FILE="${SINGBOX_DIR}/metadata.json"
 YQ_BINARY="/usr/local/bin/yq"
 SELF_SCRIPT_PATH="$0"
@@ -146,7 +145,7 @@ _install_dependencies() {
 }
 
 _install_sing_box() {
-    _info "正在安装最新稳定版 sing-box..."
+    _info "正在安装最新版本 sing-box..."
     local arch=$(uname -m)
     local arch_tag
     case $arch in
@@ -156,11 +155,23 @@ _install_sing_box() {
         *) _error "不支持的架构：$arch"; exit 1 ;;
     esac
     
-    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-    local download_url=$(curl -s "$api_url" | jq -r ".assets[] | select(.name | contains(\"linux-${arch_tag}.tar.gz\")) | .browser_download_url")
+    # 使用 releases 接口而非 latest，获取最新版本（包括预发行版）
+    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases"
+    local release_info=$(curl -s "$api_url" | jq -r '.[0]')
+    local version=$(echo "$release_info" | jq -r '.tag_name')
+    local is_prerelease=$(echo "$release_info" | jq -r '.prerelease')
+    
+    if [ "$is_prerelease" == "true" ]; then
+        _warning "检测到最新版本为预发行版: ${version}"
+    else
+        _info "检测到最新版本: ${version}"
+    fi
+    
+    local download_url=$(echo "$release_info" | jq -r ".assets[] | select(.name | contains(\"linux-${arch_tag}.tar.gz\")) | .browser_download_url")
     
     if [ -z "$download_url" ]; then _error "无法获取 sing-box 下载链接。"; exit 1; fi
     
+    _info "正在下载: $download_url"
     wget -qO sing-box.tar.gz "$download_url" || { _error "下载失败!"; exit 1; }
     
     local temp_dir=$(mktemp -d)
@@ -357,86 +368,6 @@ _initialize_config_files() {
     mkdir -p ${SINGBOX_DIR}
     [ -s "$CONFIG_FILE" ] || echo '{"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' > "$CONFIG_FILE"
     [ -s "$METADATA_FILE" ] || echo "{}" > "$METADATA_FILE"
-    if [ ! -s "$CLASH_YAML_FILE" ]; then
-        _info "正在创建全新的 clash.yaml 配置文件..."
-        cat > "$CLASH_YAML_FILE" << 'EOF'
-port: 7890
-socks-port: 7891
-mixed-port: 7892
-allow-lan: false
-bind-address: '*'
-mode: rule
-log-level: info
-ipv6: false
-find-process-mode: strict
-external-controller: '127.0.0.1:9090'
-profile:
-  store-selected: true
-  store-fake-ip: true
-unified-delay: true
-tcp-concurrent: true
-ntp:
-  enable: true
-  write-to-system: false
-  server: ntp.aliyun.com
-  port: 123
-  interval: 30
-dns:
-  enable: true
-  respect-rules: true
-  use-system-hosts: true
-  prefer-h3: false
-  listen: '0.0.0.0:1053'
-  ipv6: false
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.1/16
-  use-hosts: true
-  fake-ip-filter:
-    - +.lan
-    - +.local
-    - localhost.ptlogin2.qq.com
-    - +.msftconnecttest.com
-    - +.msftncsi.com
-  nameserver:
-    - 1.1.1.1
-    - 8.8.8.8
-    - 'https://1.1.1.1/dns-query'
-    - 'https://dns.quad9.net/dns-query'
-  default-nameserver:
-    - 1.1.1.1
-    - 8.8.8.8
-  proxy-server-nameserver:
-    - 223.5.5.5
-    - 119.29.29.29
-  fallback:
-    - 'https://1.0.0.1/dns-query'
-    - 'https://9.9.9.10/dns-query'
-  fallback-filter:
-    geoip: true
-    geoip-code: CN
-    ipcidr:
-      - 240.0.0.0/4
-tun:
-  enable: true
-  stack: system
-  auto-route: true
-  auto-detect-interface: true
-  strict-route: false
-  dns-hijack:
-    - 'any:53'
-  device: SakuraiTunnel
-  endpoint-independent-nat: true
-proxies: []
-proxy-groups:
-  - name: 节点选择
-    type: select
-    proxies: []
-rules:
-  - GEOIP,PRIVATE,DIRECT,no-resolve
-  - GEOIP,CN,DIRECT
-  - MATCH,节点选择
-EOF
-    fi
 }
 
 _generate_self_signed_cert() {
@@ -468,32 +399,6 @@ _atomic_modify_json() {
         mv "${file_path}.tmp" "$file_path"
         return 1
     fi
-}
-
-_atomic_modify_yaml() {
-    local file_path="$1"
-    local yq_filter="$2"
-    cp "$file_path" "${file_path}.tmp"
-    if ${YQ_BINARY} eval "$yq_filter" -i "$file_path"; then
-        rm "${file_path}.tmp"
-    else
-        _error "修改YAML文件 '$file_path' 失败！配置已回滚。"
-        mv "${file_path}.tmp" "$file_path"
-        return 1
-    fi
-}
-
-_add_node_to_yaml() {
-    local proxy_json="$1"
-    local proxy_name=$(echo "$proxy_json" | jq -r .name)
-    _atomic_modify_yaml "$CLASH_YAML_FILE" ".proxies |= . + [${proxy_json}] | .proxies |= unique_by(.name)"
-    _atomic_modify_yaml "$CLASH_YAML_FILE" '.proxy-groups[] |= (select(.name == "节点选择") | .proxies |= . + ["'${proxy_name}'"] | .proxies |= unique)'
-}
-
-_remove_node_from_yaml() {
-    local proxy_name="$1"
-    _atomic_modify_yaml "$CLASH_YAML_FILE" 'del(.proxies[] | select(.name == "'${proxy_name}'"))'
-    _atomic_modify_yaml "$CLASH_YAML_FILE" '.proxy-groups[] |= (select(.name == "节点选择") | .proxies |= del(.[] | select(. == "'${proxy_name}'")))'
 }
 
 _add_trojan_ws_tls() {
@@ -580,39 +485,18 @@ _add_trojan_ws_tls() {
             }
         }')
     _atomic_modify_json "$CONFIG_FILE" ".inbounds += [$inbound_json]" || return 1
-
-    # 代理配置
-    local proxy_json=$(jq -n \
-            --arg n "$name" \
-            --arg s "$client_server_addr" \
-            --arg p "$port" \
-            --arg pw "$password" \
-            --arg sn "$camouflage_domain" \
-            --arg wsp "$ws_path" \
-            --arg skip_verify_bool "$skip_verify" \
-            --arg host_header "$camouflage_domain" \
-            '{
-                "name": $n,
-                "type": "trojan",
-                "server": $s,
-                "port": ($p|tonumber),
-                "password": $pw,
-                "sni": $sn,
-                "skip-cert-verify": ($skip_verify_bool == "true"),
-                "network": "ws",
-                "ws-opts": {
-                    "path": $wsp,
-                    "headers": {
-                        "Host": $host_header
-                    }
-                }
-            }')
-            
-    _add_node_to_yaml "$proxy_json"
+    
+    # 生成分享链接
+    local sni_param="&sni=${camouflage_domain}"
+    local ws_param="&type=ws&path=$(_url_encode "$ws_path")"
+    local host_param="&host=${camouflage_domain}"
+    local url="trojan://${password}@${client_server_addr}:${port}?security=tls${sni_param}${ws_param}${host_param}#$(_url_encode "$name")"
+    
     _success "Trojan (WebSocket+TLS) 节点添加成功!"
     _success "客户端连接地址: ${client_server_addr}"
     _success "伪装域名: ${camouflage_domain}"
     _success "密码: ${password}"
+    _success "分享链接: ${url}"
 }
 
 _view_nodes() {
@@ -622,37 +506,23 @@ _view_nodes() {
     jq -c '.inbounds[]' "$CONFIG_FILE" | while read -r node; do
         local tag=$(echo "$node" | jq -r '.tag') type=$(echo "$node" | jq -r '.type') port=$(echo "$node" | jq -r '.listen_port')
         
-        local proxy_name_to_find=""
-        local proxy_obj_by_port=$(${YQ_BINARY} eval '.proxies[] | select(.port == '${port}')' ${CLASH_YAML_FILE} | head -n 1)
-
-        if [ -n "$proxy_obj_by_port" ]; then
-             proxy_name_to_find=$(echo "$proxy_obj_by_port" | ${YQ_BINARY} eval '.name' -)
-        fi
-
-        if [[ -z "$proxy_name_to_find" ]]; then
-            proxy_name_to_find=$(${YQ_BINARY} eval '.proxies[] | select(.port == '${port}' or .port == 443) | .name' ${CLASH_YAML_FILE} | head -n 1)
-        fi
-
-        local display_server=$(${YQ_BINARY} eval '.proxies[] | select(.name == "'${proxy_name_to_find}'") | .server' ${CLASH_YAML_FILE} | head -n 1)
-        local display_ip=$(echo "$display_server" | tr -d '[]')
-        
         echo "-------------------------------------"
         _info " 节点: ${tag}"
+        
         local url=""
         case "$type" in
             "trojan")
                 local password=$(echo "$node" | jq -r '.users[0].password')
-                local server_addr=$(${YQ_BINARY} eval '.proxies[] | select(.name == "'${proxy_name_to_find}'") | .server' ${CLASH_YAML_FILE} | head -n 1)
-                local host_header=$(${YQ_BINARY} eval '.proxies[] | select(.name == "'${proxy_name_to_find}'") | .ws-opts.headers.Host' ${CLASH_YAML_FILE} | head -n 1)
-                local client_port=$(${YQ_BINARY} eval '.proxies[] | select(.name == "'${proxy_name_to_find}'") | .port' ${CLASH_YAML_FILE} | head -n 1)
                 local ws_path=$(echo "$node" | jq -r '.transport.path')
-                local encoded_path=$(_url_encode "$ws_path")
+                local sni=$(echo "$node" | jq -r '.tls.server_name // empty')
+                [ -z "$sni" ] && sni=$(echo "$node" | jq -r '.transport.headers.Host // empty')
+                [ -z "$sni" ] && sni=$server_ip
                 
-                local sni_param="&sni=${host_header}"
-                local ws_param="&type=ws&path=${encoded_path}"
-                local host_param="&host=${host_header}"
+                local sni_param="&sni=${sni}"
+                local ws_param="&type=ws&path=$(_url_encode "$ws_path")"
+                local host_param="&host=${sni}"
                 
-                url="trojan://${password}@${server_addr}:${client_port}?security=tls${sni_param}${ws_param}${host_param}#$(_url_encode "$tag")"
+                url="trojan://${password}@${server_ip}:${port}?security=tls${sni_param}${ws_param}${host_param}#$(_url_encode "$tag")"
                 ;;
         esac
         [ -n "$url" ] && echo -e "  ${YELLOW}分享链接:${NC} ${url}"
@@ -673,9 +543,6 @@ _delete_node() {
     local index=$((num - 1))
     local node_to_del_obj=$(jq ".inbounds[$index]" "$CONFIG_FILE")
     local tag_to_del=$(echo "$node_to_del_obj" | jq -r ".tag")
-    local port_to_del=$(echo "$node_to_del_obj" | jq -r ".listen_port")
-
-    local proxy_name_to_del=$(${YQ_BINARY} eval '.proxies[] | select(.port == '${port_to_del}') | .name' ${CLASH_YAML_FILE} | head -n 1)
 
     read -p "$(echo -e ${YELLOW}"确定要删除节点 ${tag_to_del} 吗? (y/N): "${NC})" confirm
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
@@ -685,9 +552,6 @@ _delete_node() {
     
     _atomic_modify_json "$CONFIG_FILE" "del(.inbounds[${index}])" || return
     _atomic_modify_json "$METADATA_FILE" "del(.\"$tag_to_del\")" || return
-    if [ -n "$proxy_name_to_del" ]; then
-        _remove_node_from_yaml "$proxy_name_to_del"
-    fi
     
     _success "节点 ${tag_to_del} 已删除！"
     _manage_service "restart"
@@ -706,7 +570,7 @@ _check_config() {
 
 # 新增：一键更新 sing-box 程序
 _update_sing_box() {
-    _warning "即将更新 sing-box 程序到最新稳定版..."
+    _warning "即将更新 sing-box 程序到最新版本..."
     _warning "当前版本: $(${SINGBOX_BIN} version)"
     read -p "$(echo -e ${YELLOW}"确定要继续吗? (y/N): "${NC})" confirm
     
@@ -720,7 +584,6 @@ _update_sing_box() {
     
     _info "正在备份当前配置文件..."
     cp "$CONFIG_FILE" "${CONFIG_FILE}.backup"
-    cp "$CLASH_YAML_FILE" "${CLASH_YAML_FILE}.backup"
     
     _info "正在下载最新版 sing-box..."
     local arch=$(uname -m)
@@ -732,8 +595,19 @@ _update_sing_box() {
         *) _error "不支持的架构：$arch"; return 1 ;;
     esac
     
-    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-    local download_url=$(curl -s "$api_url" | jq -r ".assets[] | select(.name | contains(\"linux-${arch_tag}.tar.gz\")) | .browser_download_url")
+    # 使用 releases 接口而非 latest，获取最新版本（包括预发行版）
+    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases"
+    local release_info=$(curl -s "$api_url" | jq -r '.[0]')
+    local version=$(echo "$release_info" | jq -r '.tag_name')
+    local is_prerelease=$(echo "$release_info" | jq -r '.prerelease')
+    
+    if [ "$is_prerelease" == "true" ]; then
+        _warning "检测到最新版本为预发行版: ${version}"
+    else
+        _info "检测到最新版本: ${version}"
+    fi
+    
+    local download_url=$(echo "$release_info" | jq -r ".assets[] | select(.name | contains(\"linux-${arch_tag}.tar.gz\")) | .browser_download_url")
     
     if [ -z "$download_url" ]; then
         _error "无法获取 sing-box 下载链接。"
@@ -767,7 +641,6 @@ _update_sing_box() {
     else
         _error "下载失败，已回滚到旧版本。"
         mv "${CONFIG_FILE}.backup" "$CONFIG_FILE" 2>/dev/null
-        mv "${CLASH_YAML_FILE}.backup" "$CLASH_YAML_FILE" 2>/dev/null
         _manage_service "start"
     fi
 }
