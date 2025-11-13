@@ -598,18 +598,18 @@ _update_sing_box() {
     fi
     
     # 版本对比
-    if [ "$current_version" = "$latest_version" ]; then
-        _success "当前已是最新版本，无需更新。"
-        return 0
-    fi
-    
-    # 检查新版本是否大于当前版本
-    if printf '%s\n%s\n' "$current_version" "$latest_version" | sort -V -C; then
-        _success "发现新版本: ${latest_version}"
-    else
-        _success "当前已是最新版本，无需更新。"
-        return 0
-    fi
+if [ "$current_version" = "$latest_version" ]; then
+    _success "当前已是最新版本,无需更新。"
+    return 0
+fi
+
+# 检查新版本是否大于当前版本
+if [ "$(printf '%s\n' "$current_version" "$latest_version" | sort -V | head -n1)" = "$current_version" ]; then
+    _success "发现新版本: ${latest_version}"
+else
+    _warning "检测到版本号异常 (当前: ${current_version}, 最新: ${latest_version}),跳过更新。"
+    return 0
+fi
     
     # 开始更新
     _info "正在停止 sing-box 服务..."
