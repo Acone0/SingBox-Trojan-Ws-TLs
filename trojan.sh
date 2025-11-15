@@ -301,14 +301,31 @@ _uninstall() {
     read -p "$(echo -e ${YELLOW}"确定要执行卸载吗? (y/N): "${NC})" confirm
     if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
         _manage_service "stop"
+        
+        # 移除服务
         if [ "$INIT_SYSTEM" == "systemd" ]; then
             systemctl disable sing-box >/dev/null 2>&1
+            systemctl daemon-reload
+            
+            # 移除 acme.sh timer
+            systemctl disable --now acme-renew.timer >/dev/null 2>&1
+            rm -f /etc/systemd/system/acme-renew.service /etc/systemd/system/acme-renew.timer
             systemctl daemon-reload
         elif [ "$INIT_SYSTEM" == "openrc" ]; then
             rc-update del sing-box default >/dev/null 2>&1
         fi
         
+        # 移除 cron 任务
+        if command -v crontab &>/dev/null; then
+            crontab -l 2>/dev/null | grep -v "acme.sh --cron" > /tmp/cron.tmp
+            crontab /tmp/cron.tmp
+            rm -f /tmp/cron.tmp
+        fi
+        
+        # 删除所有相关文件和目录
         rm -rf ${SINGBOX_BIN} ${SINGBOX_DIR} ${SERVICE_FILE} ${LOG_FILE} ${PID_FILE}
+        rm -rf ${ACME_SH_HOME}
+        
         _success "清理完成。脚本已自毁。再见！"
         rm -f "${SELF_SCRIPT_PATH}"
         exit 0
@@ -355,10 +372,15 @@ _setup_cert_renewal() {
     # 检查是否有 cron
     if command -v crontab &>/dev/null; then
         crontab -l 2>/dev/null | grep -v "acme.sh --cron" > /tmp/cron.tmp
-        echo '0 0 * * * "/root/.acme.sh"/acme.sh --cron --home "/root/.acme.sh" > /dev/null' >> /tmp/cron.tmp
+        
+        # 添加续期任务（每天凌晨检查），续期后重启 sing-box 以应用新证书
+        cat >> /tmp/cron.tmp <<EOF
+0 0 * * * "${ACME_SH_HOME}/acme.sh" --cron --home "${ACME_SH_HOME}" > /dev/null && systemctl is-active --quiet sing-box && systemctl restart sing-box
+EOF
+        
         crontab /tmp/cron.tmp
         rm -f /tmp/cron.tmp
-        _success "已设置 cron 定时续期任务（每天凌晨执行）"
+        _success "已设置 cron 定时续期任务（每天凌晨执行，续期成功后自动重启 sing-box）"
     else
         _warning "未检测到 cron, 无法设置自动续期"
         _warning "Let's Encrypt 证书有效期为90天, 请手动运行: ${ACME_SH_HOME}/acme.sh --cron"
@@ -372,7 +394,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=${ACME_SH_HOME}/acme.sh --cron --home ${ACME_SH_HOME}
+ExecStart=/bin/bash -c '${ACME_SH_HOME}/acme.sh --cron --home ${ACME_SH_HOME} && systemctl is-active --quiet sing-box && systemctl restart sing-box'
 EOF
 
             cat > /etc/systemd/system/acme-renew.timer <<EOF
@@ -388,7 +410,7 @@ WantedBy=timers.target
 EOF
             systemctl daemon-reload
             systemctl enable --now acme-renew.timer
-            _success "已创建 systemd timer 自动续期"
+            _success "已创建 systemd timer 自动续期（续期成功后自动重启 sing-box）"
         fi
     fi
 }
@@ -486,7 +508,7 @@ _add_trojan_ws_tls() {
     if [ "$cert_choice" == "1" ]; then
         if _auto_cert "${camouflage_domain}"; then
             cert_path="${ACME_SH_HOME}/${camouflage_domain}_ecc/${camouflage_domain}.cer"
-            key_path="${ACME_SH_HOME}/${camouflage_domain}_ecc/${new_camouflage_domain}.key"
+            key_path="${ACME_SH_HOME}/${camouflage_domain}_ecc/${camouflage_domain}.key"
             cert_type="auto"
         else
             _error "证书申请失败, 请检查配置后重试"
@@ -562,6 +584,7 @@ _add_trojan_ws_tls() {
     _success "分享链接: ${url}"
 }
 
+# 修复证书路径bug
 _modify_node() {
     if ! jq -e '.inbounds | length > 0' "$CONFIG_FILE" >/dev/null 2>&1; then 
         _warning "当前没有任何节点。"
@@ -632,6 +655,7 @@ _modify_node() {
     
     if [[ "$reapply_cert" == "y" || "$reapply_cert" == "Y" ]]; then
         if _auto_cert "${new_camouflage_domain}"; then
+            # 修复：使用正确的变量名
             new_cert_path="${ACME_SH_HOME}/${new_camouflage_domain}_ecc/${new_camouflage_domain}.cer"
             new_key_path="${ACME_SH_HOME}/${new_camouflage_domain}_ecc/${new_camouflage_domain}.key"
             new_cert_type="auto"
