@@ -443,7 +443,7 @@ _add_trojan_ws_tls() {
 
     # 步骤 6: 证书文件
     _info "请输入 ${camouflage_domain} 对应的证书文件路径。"
-    read -p "请输入证书文件 .pem/.crt 的完整路径: " cert_path
+    read -p "请输入证书文件 .pem/.cer 的完整路径: " cert_path
     [[ ! -f "$cert_path" ]] && _error "证书文件不存在: ${cert_path}" && return 1
 
     read -p "请输入私钥文件 .key 的完整路径: " key_path
