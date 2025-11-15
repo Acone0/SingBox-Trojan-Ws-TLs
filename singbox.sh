@@ -1,28 +1,20 @@
 #!/bin/bash
-# === 全局变量与样式 ===
+# === 全局变量 ===
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-SINGBOX_BIN="/usr/local/bin/sing-box"; SINGBOX_DIR="/usr/local/etc/sing-box"
-CONFIG_FILE="${SINGBOX_DIR}/config.json"; METADATA_FILE="${SINGBOX_DIR}/metadata.json"
-LOG_FILE="/var/log/sing-box.log"; PID_FILE="/run/sing-box.pid"; ACME_SH_HOME="/root/.acme.sh"
-INIT_SYSTEM=""; SERVICE_FILE=""; SCRIPT_VERSION="4.1"; server_ip=""
+SINGBOX_BIN="/usr/local/bin/sing-box"; SINGBOX_DIR="/usr/local/etc/sing-box"; CONFIG_FILE="${SINGBOX_DIR}/config.json"
+LOG_FILE="/var/log/sing-box.log"; PID_FILE="/run/sing-box.pid"; ACME_SH_HOME="/root/.acme.sh"; INIT_SYSTEM=""; SCRIPT_VERSION="4.2"
 
 # === 工具函数 ===
 _echo_style() { echo -e "${1}${2}${NC}"; }
-_info() { _echo_style "$CYAN" "$1"; }; _success() { _echo_style "$GREEN" "$1"; }
-_warning() { _echo_style "$YELLOW" "$1"; }; _error() { _echo_style "$RED" "$1"; return 1; }
-
-_check_root() { [ "$(id -u)" -ne 0 ] && { _error "需要 root 权限"; exit 1; }; }
-format_ipv6() { local ip="$1"; [[ "$ip" == *":"* ]] && [[ "$ip" != "["* ]] && echo "[${ip}]" || echo "$ip"; }
-_url_encode() {
-  if command -v jq &>/dev/null; then echo -n "$1" | jq -s -R -r @uri; else
-    printf '%s' "$1" | sed 's/ /%20/g;s/!/%21/g;s/#/%23/g;s/$/%24/g;s/&/%26/g;s/'\''/%27/g;s/(/%28/g;s/)/%29/g;s/*/%2A/g;s/+/%2B/g;s/,/%2C/g;s/\//%2F/g;s/:/%3A/g;s/;/%3B/g;s/=/%3D/g;s/?/%3F/g;s/@/%40/g;s/\[/%5B/g;s/\]/%5D/g'
-  fi
-}
+_info() { _echo_style "$CYAN" "$1"; }; _success() { _echo_style "$GREEN" "$1"; }; _warning() { _echo_style "$YELLOW" "$1"; }; _error() { _echo_style "$RED" "$1"; return 1; }
+_check_root() { [ "$(id -u)" -ne 0 ] && { _error "需要 root"; exit 1; }; }
+format_ipv6() { [[ "$1" == *":"* ]] && [[ "$1" != "["* ]] && echo "[${1}]" || echo "$1"; }
+_url_encode() { if command -v jq &>/dev/null; then echo -n "$1" | jq -s -R -r @uri; else printf '%s' "$1" | sed 's/ /%20/g;s/!/%21/g;s/#/%23/g;s/$/%24/g;s/&/%26/g;s/'\''/%27/g;s/(/%28/g;s/)/%29/g;s/*/%2A/g;s/+/%2B/g;s/,/%2C/g;s/\//%2F/g;s/:/%3A/g;s/;/%3B/g;s/=/%3D/g;s/?/%3F/g;s/@/%40/g;s/\[/%5B/g;s/\]/%5D/g'; fi }
 trap 'rm -f ${SINGBOX_DIR}/*.tmp ${PID_FILE}' EXIT
 
-# === 依赖安装 ===
+# === 依赖 ===
 _install_dependencies() {
-  local pkgs="curl jq openssl wget procps" pm="" to_install=""
+  local pkgs="curl jq openssl wget procps" pm="" miss=""
   command -v apk &>/dev/null && { pm="apk"; pkgs="bash coreutils $pkgs"; }
   command -v apt-get &>/dev/null && pm="apt-get"
   command -v dnf &>/dev/null && pm="dnf"
@@ -30,12 +22,12 @@ _install_dependencies() {
   [ -z "$pm" ] && { _warning "未识别包管理器"; return; }
   for p in $pkgs; do
     case $pm in
-      apk) ! apk -e info "$p" &>/dev/null && to_install="$to_install $p" ;;
-      apt-get) ! dpkg -s "$p" &>/dev/null 2>&1 && to_install="$to_install $p" ;;
-      *) ! rpm -q "$p" &>/dev/null && to_install="$to_install $p" ;;
+      apk) ! apk -e info "$p" &>/dev/null && miss="$miss $p" ;;
+      apt-get) ! dpkg -s "$p" &>/dev/null 2>&1 && miss="$miss $p" ;;
+      *) ! rpm -q "$p" &>/dev/null && miss="$miss $p" ;;
     esac
   done
-  [ -n "$to_install" ] && { _info "安装依赖:$to_install"; $pm install -y $to_install || { _error "依赖安装失败"; exit 1; }; }
+  [ -n "$miss" ] && { _info "安装依赖:$miss"; $pm install -y $miss || { _error "依赖安装失败"; exit 1; }; }
   _success "依赖已满足"
 }
 
@@ -52,7 +44,7 @@ _install_sing_box() {
   rm -f sing-box.tar.gz; _success "sing-box 安装完成，版本：$(${SINGBOX_BIN} version | head -n1)"
 }
 
-# === systemd / openrc 服务 ===
+# === 服务 ===
 _detect_init_system() {
   INIT_SYSTEM="direct"; SERVICE_FILE=""
   [ -f "/sbin/openrc-run" ] && { INIT_SYSTEM="openrc"; SERVICE_FILE="/etc/init.d/sing-box"; return; }
@@ -166,33 +158,7 @@ _auto_cert() {
   local cert="${ACME_SH_HOME}/${domain}_ecc/fullchain.cer" key="${ACME_SH_HOME}/${domain}_ecc/${domain}.key"
   _success "证书申请成功"; _info "公钥: $cert"; _info "私钥: $key"
   _setup_cert_renewal
-  # 返回路径供调用者使用
   echo "$cert"; echo "$key"
-}
-
-# === 添加 Trojan 节点 ===
-_add_trojan_ws_tls() {
-  _get_public_ip
-  local client_ip; client_ip=$(curl -s4 icanhazip.com || curl -s6 icanhazip.com)
-  client_ip=$(format_ipv6 "$client_ip")
-  read -p "伪装域名 (必填): " domain
-  read -p "端口: " port; read -p "密码 (回车随机): " pwd; [ -z "$pwd" ] && pwd=$(${SINGBOX_BIN} generate rand --base64 16)
-  read -p "WS 路径 (回车随机): " path; [ -z "$path" ] && path="/$(${SINGBOX_BIN} generate rand --hex 8)"
-  local cert_choice; read -p "证书 1)自动 2)自定义 (默认1): " cert_choice; cert_choice=${cert_choice:-1}
-  local cert="" key=""; if [ "$cert_choice" == "1" ]; then
-    mapfile -t CERT < <(_auto_cert "$domain"); cert=${CERT[0]}; key=${CERT[1]}
-  else
-    read -p "公钥文件路径: " cert; read -p "私钥文件路径: " key
-    [ ! -f "$cert" -o ! -f "$key" ] && { _error "证书文件不存在"; return 1; }
-  fi
-  local tag="Trojan-ws-$port" name="Trojan-ws-$port"
-  local inbound=$(jq -n --arg t "$tag" --arg p "$port" --arg pwd "$pwd" --arg cert "$cert" --arg key "$key" --arg path "$path" --arg domain "$domain" '
-  {type: "trojan", tag: $t, listen: "::", listen_port: ($p|tonumber), users: [{password: $pwd}],
-   tls: {enabled: true, certificate_path: $cert, key_path: $key, server_name: $domain},
-   transport: {type: "ws", path: $path, headers: {Host: $domain}}}')
-  _atomic_modify_json "$CONFIG_FILE" ".inbounds += [$inbound]"
-  local url="trojan://${pwd}@$(format_ipv6 "$client_ip"):$port?security=tls&sni=$domain&type=ws&path=$(_url_encode "$path")&host=$domain#$(_url_encode "$name")"
-  _success "节点已添加"; _info "分享链接: $url"; _manage_service "restart"
 }
 
 # === 节点管理 ===
@@ -227,7 +193,7 @@ _modify_node() {
   read -p "新密码 (回车跳过): " new_pwd; [ -n "$new_pwd" ] && pwd=$new_pwd
   read -p "新路径 (回车跳过): " new_path; [ -n "$new_path" ] && path=$new_path
   read -p "新域名 (回车跳过): " new_domain; [ -n "$new_domain" ] && {
-    domain=$new_domain; mapfile -t CERT < <(_auto_cert "$domain"); cert_path=${CERT[0]}; key_path=${CERT[1]}
+    domain=$new_domain; mapfile -t CERT < <(_auto_cert "$domain")); cert_path=${CERT[0]}; key_path=${CERT[1]}
   }
   local tag="Trojan-ws-$port" inbound=$(jq -n --arg t "$tag" --arg p "$port" --arg pwd "$pwd" --arg cert "$cert_path" --arg key "$key_path" --arg path "$path" --arg dom "$domain" '
   {type: "trojan", tag: $t, listen: "::", listen_port: ($p|tonumber), users: [{password: $pwd}],
