@@ -251,7 +251,7 @@ _update_sing_box() {
 _check_autostart() {
   case "$INIT_SYSTEM" in
     systemd)
-      systemctl is-enabled sing-box &>/dev/null && _success "sing-box 已开机自启" || { _warning "未自启"; read -p "启用自启？(y/N)" e; [[ $e == y|Y ]] && systemctl enable sing-box; }
+      systemctl is-enabled sing-box &>/dev/null && _success "sing-box 已开机自启" || { _warning "未自启"; read -p "启用自启？(y/N)" e; [[ $e == y || $e == Y ]] && systemctl enable sing-box; }
       systemctl is-enabled acme-renew.timer &>/dev/null && _success "timer 已自启" || _warning "timer 未自启"
       ;;
     openrc)
