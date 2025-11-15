@@ -445,7 +445,7 @@ _auto_cert() {
     if [ $? -eq 0 ]; then
         _success "证书申请成功！"
         
-        local cert_path="${ACME_SH_HOME}/${domain}_ecc/${domain}.cer"
+        local cert_path="${ACME_SH_HOME}/${domain}_ecc/fullchain.cer"
         local key_path="${ACME_SH_HOME}/${domain}_ecc/${domain}.key"
         
         _info "证书路径: ${cert_path}"
