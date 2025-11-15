@@ -13,17 +13,17 @@ SINGBOX_BIN="/usr/local/bin/sing-box"
 SINGBOX_DIR="/usr/local/etc/sing-box"
 CONFIG_FILE="${SINGBOX_DIR}/config.json"
 METADATA_FILE="${SINGBOX_DIR}/metadata.json"
-YQ_BINARY="/usr/local/bin/yq"
 SELF_SCRIPT_PATH="$0"
 LOG_FILE="/var/log/sing-box.log"
 PID_FILE="/run/sing-box.pid"
+ACME_SH_HOME="/root/.acme.sh"
 
 # 系统特定变量
 INIT_SYSTEM="" # 将存储 'systemd', 'openrc' 或 'direct'
 SERVICE_FILE="" # 将根据 INIT_SYSTEM 设置
 
 # 脚本元数据
-SCRIPT_VERSION="3.0"
+SCRIPT_VERSION="4.0"
 
 # 全局状态变量
 server_ip=""
@@ -57,7 +57,6 @@ _check_root() {
 _url_encode() {
     echo -n "$1" | jq -s -R -r @uri
 }
-export -f _url_encode
 
 # 获取公网IP
 _get_public_ip() {
@@ -126,26 +125,11 @@ _install_dependencies() {
             fi
         fi
     fi
-
-    if ! command -v yq &>/dev/null; then
-        _info "正在安装 yq (用于YAML处理)..."
-        local arch=$(uname -m)
-        local yq_arch_tag
-        case $arch in
-            x86_64|amd64) yq_arch_tag='amd64' ;;
-            aarch64|arm64) yq_arch_tag='arm64' ;;
-            armv7l) yq_arch_tag='arm' ;;
-            *) _error "yq 安装失败: 不支持的架构：$arch"; exit 1 ;;
-        esac
-        
-        wget -qO ${YQ_BINARY} "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${yq_arch_tag}" || { _error "yq 下载失败"; exit 1; }
-        chmod +x ${YQ_BINARY}
-    fi
     _success "所有依赖均已满足。"
 }
 
 _install_sing_box() {
-    _info "正在安装最新稳定版 sing-box..."
+    _info "正在安装最新版本 sing-box..."
     local arch=$(uname -m)
     local arch_tag
     case $arch in
@@ -155,11 +139,23 @@ _install_sing_box() {
         *) _error "不支持的架构：$arch"; exit 1 ;;
     esac
     
-    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-    local download_url=$(curl -s "$api_url" | jq -r ".assets[] | select(.name | contains(\"linux-${arch_tag}.tar.gz\")) | .browser_download_url")
+    # 使用 releases 接口而非 latest，获取最新版本（包括预发行版）
+    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases"
+    local release_info=$(curl -s "$api_url" | jq -r '.[0]')
+    local version=$(echo "$release_info" | jq -r '.tag_name')
+    local is_prerelease=$(echo "$release_info" | jq -r '.prerelease')
+    
+    if [ "$is_prerelease" == "true" ]; then
+        _warning "检测到最新版本为预发行版: ${version}"
+    else
+        _info "检测到最新版本: ${version}"
+    fi
+    
+    local download_url=$(echo "$release_info" | jq -r ".assets[] | select(.name | contains(\"linux-${arch_tag}.tar.gz\")) | .browser_download_url")
     
     if [ -z "$download_url" ]; then _error "无法获取 sing-box 下载链接。"; exit 1; fi
     
+    _info "正在下载: $download_url"
     wget -qO sing-box.tar.gz "$download_url" || { _error "下载失败!"; exit 1; }
     
     local temp_dir=$(mktemp -d)
@@ -241,25 +237,16 @@ _create_service_files() {
     _success "${INIT_SYSTEM} 服务创建并启用成功。"
 }
 
-
+# 简化后的服务管理，仅保留启动和重启
 _manage_service() {
     local action="$1"
-    [ "$action" == "status" ] || _info "正在使用 ${INIT_SYSTEM} 执行: $action..."
-
+    
     case "$INIT_SYSTEM" in
         systemd)
-            case "$action" in
-                start|stop|restart|enable|disable) systemctl "$action" sing-box ;;
-                status) systemctl status sing-box --no-pager -l; return ;;
-                *) _error "无效的服务管理命令: $action"; return ;;
-            esac
+            systemctl "$action" sing-box
             ;;
         openrc)
-             if [ "$action" == "status" ]; then
-                rc-service sing-box status
-                return
-             fi
-             rc-service sing-box "$action"
+            rc-service sing-box "$action"
             ;;
         direct)
             case "$action" in
@@ -279,55 +266,33 @@ _manage_service() {
                         rm -f ${PID_FILE}
                     fi
                     ;;
-                stop)
-                    if [ ! -f "$PID_FILE" ]; then
-                        _warning "未找到 PID 文件，可能未在运行。"
-                        return
-                    fi
-                    local pid=$(cat "$PID_FILE")
-                    if ps -p $pid > /dev/null; then
-                        kill $pid
-                        sleep 1
-                        if ps -p $pid > /dev/null; then
-                           _warning "无法正常停止，正在强制终止..."
-                           kill -9 $pid
-                        fi
-                    else
-                        _warning "PID 文件中的进程 ($pid) 不存在。"
-                    fi
-                    rm -f ${PID_FILE}
-                    ;;
                 restart)
-                    _manage_service "stop"
-                    _manage_service "start"
-                    ;;
-                status)
-                    if [ -f "$PID_FILE" ] && ps -p "$(cat "$PID_FILE")" > /dev/null; then
-                        _success "sing-box 正在运行, PID: $(cat ${PID_FILE})。"
-                    else
-                        _error "sing-box 未运行。"
+                    if [ -f "$PID_FILE" ]; then
+                        local pid=$(cat "$PID_FILE")
+                        if ps -p $pid > /dev/null; then
+                            kill $pid
+                            sleep 1
+                            if ps -p $pid > /dev/null; then
+                               kill -9 $pid
+                            fi
+                        fi
+                        rm -f ${PID_FILE}
                     fi
-                    return
+                    touch "$LOG_FILE"
+                    nohup ${SINGBOX_BIN} run -c ${CONFIG_FILE} >> ${LOG_FILE} 2>&1 &
+                    echo $! > ${PID_FILE}
+                    sleep 1
+                    if ps -p "$(cat "$PID_FILE")" > /dev/null; then
+                        _success "sing-box 重启成功, PID: $(cat ${PID_FILE})。"
+                    else
+                        _error "sing-box 启动失败，请检查日志: ${LOG_FILE}"
+                        rm -f ${PID_FILE}
+                    fi
                     ;;
                  *) _error "无效的命令: $action"; return ;;
             esac
             ;;
     esac
-    _success "sing-box 服务已 $action"
-}
-
-_view_log() {
-    if [ "$INIT_SYSTEM" == "systemd" ]; then
-        _info "按 Ctrl+C 退出日志查看。"
-        journalctl -u sing-box -f --no-pager
-    else # 适用于 openrc 和 direct 模式
-        if [ ! -f "$LOG_FILE" ]; then
-            _warning "日志文件 ${LOG_FILE} 不存在。"
-            return
-        fi
-        _info "按 Ctrl+C 退出日志查看 (日志文件: ${LOG_FILE})。"
-        tail -f "$LOG_FILE"
-    fi
 }
 
 _uninstall() {
@@ -343,7 +308,7 @@ _uninstall() {
             rc-update del sing-box default >/dev/null 2>&1
         fi
         
-        rm -rf ${SINGBOX_BIN} ${SINGBOX_DIR} ${SERVICE_FILE} ${YQ_BINARY} ${LOG_FILE} ${PID_FILE}
+        rm -rf ${SINGBOX_BIN} ${SINGBOX_DIR} ${SERVICE_FILE} ${LOG_FILE} ${PID_FILE}
         _success "清理完成。脚本已自毁。再见！"
         rm -f "${SELF_SCRIPT_PATH}"
         exit 0
@@ -356,24 +321,6 @@ _initialize_config_files() {
     mkdir -p ${SINGBOX_DIR}
     [ -s "$CONFIG_FILE" ] || echo '{"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' > "$CONFIG_FILE"
     [ -s "$METADATA_FILE" ] || echo "{}" > "$METADATA_FILE"
-}
-
-_generate_self_signed_cert() {
-    local domain="$1"
-    local cert_path="$2"
-    local key_path="$3"
-
-    _info "正在为 ${domain} 生成自签名证书..."
-    openssl ecparam -genkey -name prime256v1 -out "$key_path" >/dev/null 2>&1
-    openssl req -new -x509 -days 3650 -key "$key_path" -out "$cert_path" -subj "/CN=${domain}" >/dev/null 2>&1
-    
-    if [ $? -ne 0 ]; then
-        _error "为 ${domain} 生成证书失败！"
-        rm -f "$cert_path" "$key_path"
-        return 1
-    fi
-    _success "证书 ${cert_path} 和私钥 ${key_path} 已成功生成。"
-    return 0
 }
 
 _atomic_modify_json() {
@@ -389,10 +336,111 @@ _atomic_modify_json() {
     fi
 }
 
+# 检查并安装 acme.sh
+_check_acme_sh() {
+    if [ ! -f "${ACME_SH_HOME}/acme.sh" ]; then
+        _info "正在安装 acme.sh..."
+        if ! curl https://get.acme.sh | sh; then
+            _error "acme.sh 安装失败！"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# 设置证书自动续期
+_setup_cert_renewal() {
+    _info "设置 Let's Encrypt 证书自动续期..."
+    
+    # 检查是否有 cron
+    if command -v crontab &>/dev/null; then
+        crontab -l 2>/dev/null | grep -v "acme.sh --cron" > /tmp/cron.tmp
+        echo '0 0 * * * "/root/.acme.sh"/acme.sh --cron --home "/root/.acme.sh" > /dev/null' >> /tmp/cron.tmp
+        crontab /tmp/cron.tmp
+        rm -f /tmp/cron.tmp
+        _success "已设置 cron 定时续期任务（每天凌晨执行）"
+    else
+        _warning "未检测到 cron, 无法设置自动续期"
+        _warning "Let's Encrypt 证书有效期为90天, 请手动运行: ${ACME_SH_HOME}/acme.sh --cron"
+        
+        if [ "$INIT_SYSTEM" == "systemd" ]; then
+            _info "正在创建 systemd timer 作为替代方案..."
+            cat > /etc/systemd/system/acme-renew.service <<EOF
+[Unit]
+Description=Renew Let's Encrypt certificates
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${ACME_SH_HOME}/acme.sh --cron --home ${ACME_SH_HOME}
+EOF
+
+            cat > /etc/systemd/system/acme-renew.timer <<EOF
+[Unit]
+Description=Daily renewal of Let's Encrypt certificates
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+            systemctl daemon-reload
+            systemctl enable --now acme-renew.timer
+            _success "已创建 systemd timer 自动续期"
+        fi
+    fi
+}
+
+# 自动申请 Let's Encrypt 证书
+_auto_cert() {
+    local domain="$1"
+    
+    _check_acme_sh || return 1
+    
+    if [ -z "$CF_Token" ] || [ -z "$CF_Zone_ID" ]; then
+        _info "请设置 Cloudflare API 信息:"
+        read -p "请输入 CF_Token (Global API Key 或 API Token): " CF_Token
+        read -p "请输入 CF_Zone_ID: " CF_Zone_ID
+        
+        export CF_Token
+        export CF_Zone_ID
+        
+        echo "export CF_Token=\"${CF_Token}\"" > ${SINGBOX_DIR}/cloudflare.conf
+        echo "export CF_Zone_ID=\"${CF_Zone_ID}\"" >> ${SINGBOX_DIR}/cloudflare.conf
+    fi
+    
+    if [ -f ${SINGBOX_DIR}/cloudflare.conf ]; then
+        source ${SINGBOX_DIR}/cloudflare.conf
+    fi
+    
+    _info "正在为域名 ${domain} 申请 Let's Encrypt 证书..."
+    _info "使用 Cloudflare DNS 验证方式"
+    
+    ${ACME_SH_HOME}/acme.sh --issue --dns dns_cf -d "${domain}" --server letsencrypt
+    
+    if [ $? -eq 0 ]; then
+        _success "证书申请成功！"
+        
+        local cert_path="${ACME_SH_HOME}/${domain}_ecc/${domain}.cer"
+        local key_path="${ACME_SH_HOME}/${domain}_ecc/${domain}.key"
+        
+        _info "证书路径: ${cert_path}"
+        _info "私钥路径: ${key_path}"
+        
+        _setup_cert_renewal
+        
+        return 0
+    else
+        _error "证书申请失败！请检查 Cloudflare API 配置和域名"
+        return 1
+    fi
+}
+
 _add_trojan_ws_tls() {
     _info "--- Trojan (WebSocket+TLS) 设置向导 ---"
     
-    # 步骤 1: 获取连接地址
     _info "请输入客户端用于“连接”的地址:"
     _info "  - (推荐) 直接回车, 使用VPS的公网 IP: ${server_ip}"
     _info "  - (其他)   您也可以手动输入一个IP或域名"
@@ -404,23 +452,19 @@ _add_trojan_ws_tls() {
          client_server_addr="[${client_server_addr}]"
     fi
 
-    # 步骤 2: 获取伪装域名
     _info "请输入您的“伪装域名”，必须是证书对应的域名。"
     read -p "请输入伪装域名: " camouflage_domain
     [[ -z "$camouflage_domain" ]] && _error "伪装域名不能为空" && return 1
 
-    # 步骤 3: 端口
     read -p "请输入监听端口: " port
     [[ -z "$port" ]] && _error "端口不能为空" && return 1
 
-    # 步骤 4: 密码
     read -p "请输入密码 (默认随机生成): " password
     if [ -z "$password" ]; then
         password=$(${SINGBOX_BIN} generate rand --base64 16)
         _info "已为您生成随机密码: ${password}"
     fi
 
-    # 步骤 5: 路径
     read -p "请输入 WebSocket 路径 (回车则随机生成): " ws_path
     if [ -z "$ws_path" ]; then
         ws_path="/"$(${SINGBOX_BIN} generate rand --hex 8)
@@ -429,15 +473,33 @@ _add_trojan_ws_tls() {
         [[ ! "$ws_path" == /* ]] && ws_path="/${ws_path}"
     fi
 
-    # 步骤 6: 证书文件
-    _info "请输入 ${camouflage_domain} 对应的证书文件路径。"
-    read -p "请输入证书文件 .pem/.crt 的完整路径: " cert_path
-    [[ ! -f "$cert_path" ]] && _error "证书文件不存在: ${cert_path}" && return 1
-
-    read -p "请输入私钥文件 .key 的完整路径: " key_path
-    [[ ! -f "$key_path" ]] && _error "私钥文件不存在: ${key_path}" && return 1
+    local cert_path=""
+    local key_path=""
+    local cert_type="custom"
     
-    # 步骤 7: 跳过验证
+    _info "请选择证书获取方式:"
+    _info "  1) 自动申请 Let's Encrypt 证书 (推荐)"
+    _info "  2) 使用自定义证书路径"
+    read -p "请选择 (1/2, 默认: 1): " cert_choice
+    cert_choice=${cert_choice:-1}
+    
+    if [ "$cert_choice" == "1" ]; then
+        if _auto_cert "${camouflage_domain}"; then
+            cert_path="${ACME_SH_HOME}/${camouflage_domain}_ecc/${camouflage_domain}.cer"
+            key_path="${ACME_SH_HOME}/${camouflage_domain}_ecc/${new_camouflage_domain}.key"
+            cert_type="auto"
+        else
+            _error "证书申请失败, 请检查配置后重试"
+            return 1
+        fi
+    else
+        read -p "请输入证书文件 .pem/.crt 的完整路径: " cert_path
+        [[ ! -f "$cert_path" ]] && _error "证书文件不存在: ${cert_path}" && return 1
+
+        read -p "请输入私钥文件 .key 的完整路径: " key_path
+        [[ ! -f "$key_path" ]] && _error "私钥文件不存在: ${key_path}" && return 1
+    fi
+    
     read -p "$(echo -e ${YELLOW}"是否使用 Cloudflare 源证书或自签名证书? (y/N): "${NC})" use_origin_cert
     local skip_verify=false
     if [[ "$use_origin_cert" == "y" || "$use_origin_cert" == "Y" ]]; then
@@ -445,10 +507,9 @@ _add_trojan_ws_tls() {
         _warning "已启用 'skip-cert-verify: true'。"
     fi
 
-    local tag="trojan-ws-in-${port}"
-    local name="Trojan-WS-${port}"
+    local tag="Trojan-ws-${port}"
+    local name="Trojan-ws-${port}"
     
-    # 入站配置
     local inbound_json=$(jq -n \
         --arg t "$tag" \
         --arg p "$port" \
@@ -456,6 +517,7 @@ _add_trojan_ws_tls() {
         --arg cp "$cert_path" \
         --arg kp "$key_path" \
         --arg wsp "$ws_path" \
+        --arg cd "$camouflage_domain" \
         '{
             "type": "trojan",
             "tag": $t,
@@ -465,16 +527,28 @@ _add_trojan_ws_tls() {
             "tls": {
                 "enabled": true,
                 "certificate_path": $cp,
-                "key_path": $kp
+                "key_path": $kp,
+                "server_name": $cd
             },
             "transport": {
                 "type": "ws",
-                "path": $wsp
+                "path": $wsp,
+                "headers": {
+                    "Host": $cd
+                }
             }
         }')
     _atomic_modify_json "$CONFIG_FILE" ".inbounds += [$inbound_json]" || return 1
     
-    # 生成分享链接
+    local metadata_json=$(jq -n \
+        --arg cd "$camouflage_domain" \
+        --arg ct "$cert_type" \
+        '{
+            "camouflage_domain": $cd,
+            "cert_type": $ct
+        }')
+    _atomic_modify_json "$METADATA_FILE" ".\"$tag\" = $metadata_json" || return 1
+    
     local sni_param="&sni=${camouflage_domain}"
     local ws_param="&type=ws&path=$(_url_encode "$ws_path")"
     local host_param="&host=${camouflage_domain}"
@@ -484,6 +558,160 @@ _add_trojan_ws_tls() {
     _success "客户端连接地址: ${client_server_addr}"
     _success "伪装域名: ${camouflage_domain}"
     _success "密码: ${password}"
+    _success "证书类型: $([ "$cert_type" == "auto" ] && echo "Let's Encrypt (自动续期)" || echo "自定义证书")"
+    _success "分享链接: ${url}"
+}
+
+_modify_node() {
+    if ! jq -e '.inbounds | length > 0' "$CONFIG_FILE" >/dev/null 2>&1; then 
+        _warning "当前没有任何节点。"
+        return
+    fi
+    
+    _info "--- 修改 Trojan 节点配置 ---"
+    jq -r '.inbounds[] | "\(.tag) (\(.type)) @ \(.listen_port)"' "$CONFIG_FILE" | cat -n
+    read -p "请输入要修改的节点编号 (输入 0 返回): " num
+    
+    [[ ! "$num" =~ ^[0-9]+$ ]] || [ "$num" -eq 0 ] && return
+    local count=$(jq '.inbounds | length' "$CONFIG_FILE")
+    if [ "$num" -gt "$count" ]; then 
+        _error "编号超出范围。"
+        return
+    fi
+
+    local index=$((num - 1))
+    local node_to_modify=$(jq ".inbounds[$index]" "$CONFIG_FILE")
+    local tag_to_modify=$(echo "$node_to_modify" | jq -r ".tag")
+    
+    local current_port=$(echo "$node_to_modify" | jq -r '.listen_port')
+    local current_password=$(echo "$node_to_modify" | jq -r '.users[0].password')
+    local current_ws_path=$(echo "$node_to_modify" | jq -r '.transport.path')
+    local current_cert_path=$(echo "$node_to_modify" | jq -r '.tls.certificate_path')
+    local current_key_path=$(echo "$node_to_modify" | jq -r '.tls.key_path')
+    local current_camouflage_domain=$(echo "$node_to_modify" | jq -r '.tls.server_name')
+    local current_cert_type=$(jq -r ".\"$tag_to_modify\".cert_type // \"custom\"" "$METADATA_FILE")
+    
+    _info "当前节点配置:"
+    _info "端口: ${current_port}"
+    _info "密码: ${current_password}"
+    _info "WebSocket 路径: ${current_ws_path}"
+    _info "伪装域名: ${current_camouflage_domain}"
+    _info "证书类型: $([ "$current_cert_type" == "auto" ] && echo "Let's Encrypt" || echo "自定义")"
+    _info "证书路径: ${current_cert_path}"
+    _info "私钥路径: ${current_key_path}"
+    echo
+    
+    read -p "是否修改端口? (当前: ${current_port}, 回车保持, 否则输入新端口): " new_port
+    new_port=${new_port:-$current_port}
+    [[ -z "$new_port" ]] && new_port=$current_port
+    
+    read -p "是否修改密码? (当前: ${current_password}, 回车保持, 否则输入新密码): " new_password
+    new_password=${new_password:-$current_password}
+    if [ -z "$new_password" ]; then
+        new_password=$(${SINGBOX_BIN} generate rand --base64 16)
+        _info "已为您生成随机密码: ${new_password}"
+    fi
+    
+    read -p "是否修改 WebSocket 路径? (当前: ${current_ws_path}, 回车保持, 否则输入新路径): " new_ws_path
+    new_ws_path=${new_ws_path:-$current_ws_path}
+    if [ -z "$new_ws_path" ]; then
+        new_ws_path="/"$(${SINGBOX_BIN} generate rand --hex 8)
+        _info "已为您生成随机 WebSocket 路径: ${new_ws_path}"
+    else
+        [[ ! "$new_ws_path" == /* ]] && new_ws_path="/${new_ws_path}"
+    fi
+    
+    read -p "是否修改伪装域名? (当前: ${current_camouflage_domain}, 回车保持, 否则输入新域名): " new_camouflage_domain
+    new_camouflage_domain=${new_camouflage_domain:-$current_camouflage_domain}
+    
+    local new_cert_type="$current_cert_type"
+    local new_cert_path="$current_cert_path"
+    local new_key_path="$current_key_path"
+    
+    read -p "是否重新申请 Let's Encrypt 证书? (当前: $([ "$current_cert_type" == "auto" ] && echo "是" || echo "否"), y/N): " reapply_cert
+    
+    if [[ "$reapply_cert" == "y" || "$reapply_cert" == "Y" ]]; then
+        if _auto_cert "${new_camouflage_domain}"; then
+            new_cert_path="${ACME_SH_HOME}/${new_camouflage_domain}_ecc/${new_camouflage_domain}.cer"
+            new_key_path="${ACME_SH_HOME}/${new_camouflage_domain}_ecc/${new_camouflage_domain}.key"
+            new_cert_type="auto"
+        else
+            _error "证书申请失败, 保持原有证书"
+        fi
+    elif [ "$current_cert_type" == "custom" ]; then
+        read -p "是否修改证书文件路径? (当前: ${current_cert_path}, 回车保持, 否则输入新路径): " temp_cert_path
+        temp_cert_path=${temp_cert_path:-$current_cert_path}
+        if [ -n "$temp_cert_path" ] && [ "$temp_cert_path" != "$current_cert_path" ]; then
+            [[ ! -f "$temp_cert_path" ]] && _error "证书文件不存在: ${temp_cert_path}" && return 1
+            new_cert_path=$temp_cert_path
+        fi
+        
+        read -p "是否修改私钥文件路径? (当前: ${current_key_path}, 回车保持, 否则输入新路径): " temp_key_path
+        temp_key_path=${temp_key_path:-$current_key_path}
+        if [ -n "$temp_key_path" ] && [ "$temp_key_path" != "$current_key_path" ]; then
+            [[ ! -f "$temp_key_path" ]] && _error "私钥文件不存在: ${temp_key_path}" && return 1
+            new_key_path=$temp_key_path
+        fi
+    fi
+    
+    local new_tag="Trojan-ws-${new_port}"
+    
+    local new_inbound=$(jq -n \
+        --arg t "$new_tag" \
+        --arg p "$new_port" \
+        --arg pw "$new_password" \
+        --arg cp "$new_cert_path" \
+        --arg kp "$new_key_path" \
+        --arg wsp "$new_ws_path" \
+        --arg cd "$new_camouflage_domain" \
+        '{
+            "type": "trojan",
+            "tag": $t,
+            "listen": "::",
+            "listen_port": ($p|tonumber),
+            "users": [{"password": $pw}],
+            "tls": {
+                "enabled": true,
+                "certificate_path": $cp,
+                "key_path": $kp,
+                "server_name": $cd
+            },
+            "transport": {
+                "type": "ws",
+                "path": $wsp,
+                "headers": {
+                    "Host": $cd
+                }
+            }
+        }')
+    
+    _atomic_modify_json "$CONFIG_FILE" ".inbounds[$index] = $new_inbound" || return
+    
+    local metadata_json=$(jq -n \
+        --arg cd "$new_camouflage_domain" \
+        --arg ct "$new_cert_type" \
+        '{
+            "camouflage_domain": $cd,
+            "cert_type": $ct
+        }')
+    _atomic_modify_json "$METADATA_FILE" ".\"$new_tag\" = $metadata_json" || return
+    
+    _manage_service "restart"
+    
+    _success "节点配置修改成功!"
+    _info "--- 修改后的节点信息 ---"
+    _info "节点名称: ${new_tag}"
+    _info "端口: ${new_port}"
+    _info "密码: ${new_password}"
+    _info "WebSocket 路径: ${new_ws_path}"
+    _info "伪装域名: ${new_camouflage_domain}"
+    _info "证书类型: $([ "$new_cert_type" == "auto" ] && echo "Let's Encrypt (自动续期)" || echo "自定义证书")"
+    
+    local sni_param="&sni=${new_camouflage_domain}"
+    local ws_param="&type=ws&path=$(_url_encode "$new_ws_path")"
+    local host_param="&host=${new_camouflage_domain}"
+    local url="trojan://${new_password}@${server_ip}:${new_port}?security=tls${sni_param}${ws_param}${host_param}#$(_url_encode "$new_tag")"
+    
     _success "分享链接: ${url}"
 }
 
@@ -545,35 +773,13 @@ _delete_node() {
     _manage_service "restart"
 }
 
-_check_config() {
-    _info "正在检查 sing-box 配置文件..."
-    local result=$(${SINGBOX_BIN} check -c ${CONFIG_FILE})
-    if [[ $? -eq 0 ]]; then
-        _success "配置文件 (${CONFIG_FILE}) 格式正确。"
-    else
-        _error "配置文件检查失败:"
-        echo "$result"
-    fi
-}
-
-# 新增：一键更新 sing-box 程序
+# 更新 sing-box 程序
 _update_sing_box() {
-    _warning "即将更新 sing-box 程序到最新稳定版..."
-    _warning "当前版本: $(${SINGBOX_BIN} version)"
-    read -p "$(echo -e ${YELLOW}"确定要继续吗? (y/N): "${NC})" confirm
+    _info "正在检查 sing-box 更新..."
     
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        _info "更新已取消。"
-        return
-    fi
+    local current_version=$(${SINGBOX_BIN} version | head -n1 | sed 's/sing-box version //')
+    _info "当前版本: ${current_version}"
     
-    _info "正在停止 sing-box 服务..."
-    _manage_service "stop"
-    
-    _info "正在备份当前配置文件..."
-    cp "$CONFIG_FILE" "${CONFIG_FILE}.backup"
-    
-    _info "正在下载最新版 sing-box..."
     local arch=$(uname -m)
     local arch_tag
     case $arch in
@@ -583,8 +789,37 @@ _update_sing_box() {
         *) _error "不支持的架构：$arch"; return 1 ;;
     esac
     
-    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-    local download_url=$(curl -s "$api_url" | jq -r ".assets[] | select(.name | contains(\"linux-${arch_tag}.tar.gz\")) | .browser_download_url")
+    local api_url="https://api.github.com/repos/SagerNet/sing-box/releases"
+    local release_info=$(curl -s "$api_url" | jq -r '.[0]')
+    local latest_version=$(echo "$release_info" | jq -r '.tag_name' | sed 's/^v//')
+    local is_prerelease=$(echo "$release_info" | jq -r '.prerelease')
+    
+    if [ "$is_prerelease" == "true" ]; then
+        _info "最新版本: ${latest_version} (预发行版)"
+    else
+        _info "最新版本: ${latest_version}"
+    fi
+    
+    if [ "$current_version" = "$latest_version" ]; then
+        _success "当前已是最新版本,无需更新。"
+        return 0
+    fi
+
+    if [ "$(printf '%s\n' "$current_version" "$latest_version" | sort -V | head -n1)" = "$current_version" ]; then
+        _success "发现新版本: ${latest_version}"
+    else
+        _warning "检测到版本号异常 (当前: ${current_version}, 最新: ${latest_version}),跳过更新。"
+        return 0
+    fi
+    
+    _info "正在停止 sing-box 服务..."
+    _manage_service "stop"
+    
+    _info "正在备份当前配置文件..."
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.backup"
+    
+    _info "正在下载新版本..."
+    local download_url=$(echo "$release_info" | jq -r ".assets[] | select(.name | contains(\"linux-${arch_tag}.tar.gz\")) | .browser_download_url")
     
     if [ -z "$download_url" ]; then
         _error "无法获取 sing-box 下载链接。"
@@ -602,7 +837,7 @@ _update_sing_box() {
         rm -rf sing-box.tar.gz "$temp_dir"
         
         _success "sing-box 更新成功！"
-        _success "新版本: $(${SINGBOX_BIN} version)"
+        _info "新版本: $(${SINGBOX_BIN} version | head -n1)"
         
         _info "正在检查配置文件兼容性..."
         if ${SINGBOX_BIN} check -c ${CONFIG_FILE} >/dev/null 2>&1; then
@@ -626,39 +861,29 @@ _main_menu() {
     while true; do
         clear
         echo "===================================================="
-        _info "      sing-box 全功能管理脚本 v${SCRIPT_VERSION}"
+        _info "      sing-box 一键 Trojan 脚本 v${SCRIPT_VERSION}"
         echo "===================================================="
         _info "【节点管理】"
         echo "  1) 添加 Trojan 节点"
         echo "  2) 查看节点分享链接"
         echo "  3) 删除节点"
-        echo "----------------------------------------------------"
-        _info "【服务控制】"
-        echo "  4) 重启 sing-box"
-        echo "  5) 停止 sing-box"
-        echo "  6) 查看 sing-box 运行状态"
-        echo "  7) 查看 sing-box 实时日志"
+        echo "  4) 修改 Trojan 节点配置"
         echo "----------------------------------------------------"
         _info "【更新与维护】"
-        echo "  8) 检查配置文件"
-        echo "  9) 更新 sing-box 程序"
+        echo "  5) 更新 sing-box 程序"
         echo "----------------------------------------------------"
-        echo " 10) 卸载 sing-box 及脚本"
+        echo "  6) 卸载 sing-box 及脚本"
         echo "  0) 退出脚本"
         echo "===================================================="
-        read -p "请输入选项 [0-10]: " choice
+        read -p "请输入选项 [0-6]: " choice
 
         case $choice in
             1) _add_trojan_ws_tls; [ $? -eq 0 ] && _manage_service "restart" ;;
             2) _view_nodes ;;
             3) _delete_node ;;
-            4) _manage_service "restart" ;;
-            5) _manage_service "stop" ;;
-            6) _manage_service "status" ;;
-            7) _view_log ;;
-            8) _check_config ;;
-            9) _update_sing_box ;;
-           10) _uninstall ;;
+            4) _modify_node ;;
+            5) _update_sing_box ;;
+            6) _uninstall ;;
             0) exit 0 ;;
             *) _error "无效输入，请重试。" ;;
         esac
