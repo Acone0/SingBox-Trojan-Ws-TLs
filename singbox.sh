@@ -365,41 +365,36 @@ _check_acme_sh() {
     return 0
 }
 
-# 设置证书自动续期
+# 设置证书自动续期（全平台强制 systemd-timer，无 systemd 再回退）
 _setup_cert_renewal() {
     _info "设置 Let's Encrypt 证书自动续期..."
-    
-    # 检查是否有 cron
-    if command -v crontab &>/dev/null; then
-        crontab -l 2>/dev/null | grep -v "acme.sh --cron" > /tmp/cron.tmp
-        
-        # 添加续期任务（每天凌晨检查），续期后重启 sing-box 以应用新证书
-        cat >> /tmp/cron.tmp <<EOF
-0 0 * * * "${ACME_SH_HOME}/acme.sh" --cron --home "${ACME_SH_HOME}" > /dev/null && systemctl is-active --quiet sing-box && systemctl restart sing-box
-EOF
-        
-        crontab /tmp/cron.tmp
-        rm -f /tmp/cron.tmp
-        _success "已设置 cron 定时续期任务（每天凌晨执行，续期成功后自动重启 sing-box）"
-    else
-        _warning "未检测到 cron, 无法设置自动续期"
-        _warning "Let's Encrypt 证书有效期为90天, 请手动运行: ${ACME_SH_HOME}/acme.sh --cron"
-        
-        if [ "$INIT_SYSTEM" == "systemd" ]; then
-            _info "正在创建 systemd timer 作为替代方案..."
-            cat > /etc/systemd/system/acme-renew.service <<EOF
+
+    # 1) 必须存在 systemd
+    if [ "$INIT_SYSTEM" != "systemd" ]; then
+        _warning "当前非 systemd，无法使用 timer；请手动执行 ${ACME_SH_HOME}/acme.sh --cron"
+        return 0
+    fi
+
+    # 2) 单元文件路径
+    local SERVICE_FILE="/etc/systemd/system/acme-renew.service"
+    local TIMER_FILE="/etc/systemd/system/acme-renew.timer"
+
+    # 3) 写入 service 单元（fullchain + 重启 sing-box）
+    cat > "$SERVICE_FILE" <<'EOF'
 [Unit]
 Description=Renew Let's Encrypt certificates
 After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '${ACME_SH_HOME}/acme.sh --cron --home ${ACME_SH_HOME} && systemctl is-active --quiet sing-box && systemctl restart sing-box'
+ExecStart=/bin/bash -c '/root/.acme.sh/acme.sh --cron --home /root/.acme.sh \
+&& systemctl is-active --quiet sing-box && systemctl restart sing-box'
 EOF
 
-            cat > /etc/systemd/system/acme-renew.timer <<EOF
+    # 4) 写入 timer 单元（每天 00:00，错过开机补跑）
+    cat > "$TIMER_FILE" <<'EOF'
 [Unit]
-Description=Daily renewal of Let's Encrypt certificates
+Description=Daily renewal check
 
 [Timer]
 OnCalendar=daily
@@ -408,10 +403,17 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-            systemctl daemon-reload
-            systemctl enable --now acme-renew.timer
-            _success "已创建 systemd timer 自动续期（续期成功后自动重启 sing-box）"
-        fi
+
+    # 5) 重载+启用+立即启动
+    systemctl daemon-reload
+    systemctl enable --now acme-renew.timer
+
+    # 6) 验证
+    if systemctl is-enabled acme-renew.timer &>/dev/null; then
+        _success "systemd timer 已创建并设为开机自启"
+        systemctl list-timers acme-renew.timer --no-pager
+    else
+        _error "timer 启用失败，请检查 systemd 是否正常运行"
     fi
 }
 
