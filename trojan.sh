@@ -584,14 +584,14 @@ _add_trojan_ws_tls() {
     _success "分享链接: ${url}"
 }
 
-# 修复证书路径bug
+# 逐项选择修改节点配置（每修改一项立即重启并显示信息）
 _modify_node() {
     if ! jq -e '.inbounds | length > 0' "$CONFIG_FILE" >/dev/null 2>&1; then 
         _warning "当前没有任何节点。"
         return
     fi
     
-    _info "--- 修改 Trojan 节点配置 ---"
+    _info "--- 选择要修改的节点 ---"
     jq -r '.inbounds[] | "\(.tag) (\(.type)) @ \(.listen_port)"' "$CONFIG_FILE" | cat -n
     read -p "请输入要修改的节点编号 (输入 0 返回): " num
     
@@ -614,72 +614,118 @@ _modify_node() {
     local current_camouflage_domain=$(echo "$node_to_modify" | jq -r '.tls.server_name')
     local current_cert_type=$(jq -r ".\"$tag_to_modify\".cert_type // \"custom\"" "$METADATA_FILE")
     
-    _info "当前节点配置:"
-    _info "端口: ${current_port}"
-    _info "密码: ${current_password}"
-    _info "WebSocket 路径: ${current_ws_path}"
-    _info "伪装域名: ${current_camouflage_domain}"
-    _info "证书类型: $([ "$current_cert_type" == "auto" ] && echo "Let's Encrypt" || echo "自定义")"
-    _info "证书路径: ${current_cert_path}"
-    _info "私钥路径: ${current_key_path}"
+    clear
+    _info "--- 修改 Trojan 节点: ${tag_to_modify} ---"
+    _info "当前配置:"
+    _info "1) 端口: ${current_port}"
+    _info "2) 密码: ${current_password}"
+    _info "3) WebSocket 路径: ${current_ws_path}"
+    _info "4) 伪装域名: ${current_camouflage_domain}"
+    _info "5) 证书类型: $([ "$current_cert_type" == "auto" ] && echo "Let's Encrypt (自动续期)" || echo "自定义证书")"
+    _info "6) 证书路径: ${current_cert_path}"
+    _info "7) 私钥路径: ${current_key_path}"
     echo
     
-    read -p "是否修改端口? (当前: ${current_port}, 回车保持, 否则输入新端口): " new_port
-    new_port=${new_port:-$current_port}
-    [[ -z "$new_port" ]] && new_port=$current_port
-    
-    read -p "是否修改密码? (当前: ${current_password}, 回车保持, 否则输入新密码): " new_password
-    new_password=${new_password:-$current_password}
-    if [ -z "$new_password" ]; then
-        new_password=$(${SINGBOX_BIN} generate rand --base64 16)
-        _info "已为您生成随机密码: ${new_password}"
-    fi
-    
-    read -p "是否修改 WebSocket 路径? (当前: ${current_ws_path}, 回车保持, 否则输入新路径): " new_ws_path
-    new_ws_path=${new_ws_path:-$current_ws_path}
-    if [ -z "$new_ws_path" ]; then
-        new_ws_path="/"$(${SINGBOX_BIN} generate rand --hex 8)
-        _info "已为您生成随机 WebSocket 路径: ${new_ws_path}"
-    else
-        [[ ! "$new_ws_path" == /* ]] && new_ws_path="/${new_ws_path}"
-    fi
-    
-    read -p "是否修改伪装域名? (当前: ${current_camouflage_domain}, 回车保持, 否则输入新域名): " new_camouflage_domain
-    new_camouflage_domain=${new_camouflage_domain:-$current_camouflage_domain}
-    
-    local new_cert_type="$current_cert_type"
+    _info "请选择要修改的项:"
+    echo "  1) 修改端口"
+    echo "  2) 修改密码"
+    echo "  3) 修改 WebSocket 路径"
+    echo "  4) 修改伪装域名（将自动重新申请证书）"
+    echo "  5) 修改证书路径（仅自定义证书）"
+    echo "  0) 取消并返回"
+    read -p "请输入选项 [0-5]: " modify_choice
+
+    local new_port="$current_port"
+    local new_password="$current_password"
+    local new_ws_path="$current_ws_path"
+    local new_camouflage_domain="$current_camouflage_domain"
     local new_cert_path="$current_cert_path"
     local new_key_path="$current_key_path"
+    local new_cert_type="$current_cert_type"
+    local new_tag="$tag_to_modify"
+    local changed=false
+
+    case $modify_choice in
+        1)
+            read -p "请输入新端口 (当前: ${current_port}): " new_port
+            [[ -z "$new_port" ]] && new_port=$current_port
+            _success "端口已修改为: ${new_port}"
+            changed=true
+            ;;
+        2)
+            read -p "请输入新密码 (当前: ${current_password}): " new_password
+            if [ -z "$new_password" ]; then
+                new_password=$(${SINGBOX_BIN} generate rand --base64 16)
+                _info "已为您生成随机密码: ${new_password}"
+            fi
+            _success "密码已修改"
+            changed=true
+            ;;
+        3)
+            read -p "请输入新 WebSocket 路径 (当前: ${current_ws_path}): " new_ws_path
+            if [ -z "$new_ws_path" ]; then
+                new_ws_path="/"$(${SINGBOX_BIN} generate rand --hex 8)
+                _info "已为您生成随机 WebSocket 路径: ${new_ws_path}"
+            else
+                [[ ! "$new_ws_path" == /* ]] && new_ws_path="/${new_ws_path}"
+            fi
+            _success "WebSocket 路径已修改为: ${new_ws_path}"
+            changed=true
+            ;;
+        4)
+            read -p "请输入新伪装域名 (当前: ${current_camouflage_domain}): " new_camouflage_domain
+            [[ -z "$new_camouflage_domain" ]] && new_camouflage_domain=$current_camouflage_domain
+            
+            _info "伪装域名已修改为: ${new_camouflage_domain}"
+            _info "正在自动申请新的 Let's Encrypt 证书..."
+            
+            if _auto_cert "${new_camouflage_domain}"; then
+                # 修复：删除错误的变量引用，使用正确的 new_camouflage_domain
+                new_cert_path="${ACME_SH_HOME}/${new_camouflage_domain}_ecc/${new_camouflage_domain}.cer"
+                new_key_path="${ACME_SH_HOME}/${new_camouflage_domain}_ecc/${new_camouflage_domain}.key"
+                new_camouflage_domain=$new_camouflage_domain
+                new_cert_type="auto"
+                _success "证书申请成功并已自动应用到节点配置"
+                changed=true
+            else
+                _error "证书申请失败，保持原有证书配置"
+                return 1
+            fi
+            ;;
+        5)
+            if [ "$current_cert_type" == "auto" ]; then
+                _warning "当前使用的是 Let's Encrypt 自动证书，无需手动修改路径"
+                return
+            fi
+            
+            read -p "请输入新证书文件路径 (当前: ${current_cert_path}): " new_cert_path
+            new_cert_path=${new_cert_path:-$current_cert_path}
+            [[ ! -f "$new_cert_path" ]] && _error "证书文件不存在: ${new_cert_path}" && return
+            
+            read -p "请输入新私钥文件路径 (当前: ${current_key_path}): " new_key_path
+            new_key_path=${new_key_path:-$current_key_path}
+            [[ ! -f "$new_key_path" ]] && _error "私钥文件不存在: ${new_key_path}" && return
+            
+            _success "证书路径已更新"
+            changed=true
+            ;;
+        0)
+            _info "取消修改并返回主菜单。"
+            return
+            ;;
+        *)
+            _error "无效选项，请重新选择。"
+            return
+            ;;
+    esac
     
-    read -p "是否重新申请 Let's Encrypt 证书? (当前: $([ "$current_cert_type" == "auto" ] && echo "是" || echo "否"), y/N): " reapply_cert
+    # 如果没有任何修改，直接返回
+    [[ "$changed" != "true" ]] && return
     
-    if [[ "$reapply_cert" == "y" || "$reapply_cert" == "Y" ]]; then
-        if _auto_cert "${new_camouflage_domain}"; then
-            # 修复：使用正确的变量名
-            new_cert_path="${ACME_SH_HOME}/${new_camouflage_domain}_ecc/${new_camouflage_domain}.cer"
-            new_key_path="${ACME_SH_HOME}/${new_camouflage_domain}_ecc/${new_camouflage_domain}.key"
-            new_cert_type="auto"
-        else
-            _error "证书申请失败, 保持原有证书"
-        fi
-    elif [ "$current_cert_type" == "custom" ]; then
-        read -p "是否修改证书文件路径? (当前: ${current_cert_path}, 回车保持, 否则输入新路径): " temp_cert_path
-        temp_cert_path=${temp_cert_path:-$current_cert_path}
-        if [ -n "$temp_cert_path" ] && [ "$temp_cert_path" != "$current_cert_path" ]; then
-            [[ ! -f "$temp_cert_path" ]] && _error "证书文件不存在: ${temp_cert_path}" && return 1
-            new_cert_path=$temp_cert_path
-        fi
-        
-        read -p "是否修改私钥文件路径? (当前: ${current_key_path}, 回车保持, 否则输入新路径): " temp_key_path
-        temp_key_path=${temp_key_path:-$current_key_path}
-        if [ -n "$temp_key_path" ] && [ "$temp_key_path" != "$current_key_path" ]; then
-            [[ ! -f "$temp_key_path" ]] && _error "私钥文件不存在: ${temp_key_path}" && return 1
-            new_key_path=$temp_key_path
-        fi
-    fi
+    # 更新 tag（如果端口改变了）
+    new_tag="Trojan-ws-${new_port}"
     
-    local new_tag="Trojan-ws-${new_port}"
-    
+    # 构建新的入站配置
     local new_inbound=$(jq -n \
         --arg t "$new_tag" \
         --arg p "$new_port" \
@@ -720,9 +766,11 @@ _modify_node() {
         }')
     _atomic_modify_json "$METADATA_FILE" ".\"$new_tag\" = $metadata_json" || return
     
+    # 重启 sing-box 以应用更改
     _manage_service "restart"
     
-    _success "节点配置修改成功!"
+    # 显示修改后的节点信息
+    _success "节点配置修改成功并已重启服务！"
     _info "--- 修改后的节点信息 ---"
     _info "节点名称: ${new_tag}"
     _info "端口: ${new_port}"
@@ -737,6 +785,8 @@ _modify_node() {
     local url="trojan://${new_password}@${server_ip}:${new_port}?security=tls${sni_param}${ws_param}${host_param}#$(_url_encode "$new_tag")"
     
     _success "分享链接: ${url}"
+    
+    read -n 1 -s -r -p "按任意键返回主菜单..."
 }
 
 _view_nodes() {
@@ -881,6 +931,44 @@ _update_sing_box() {
     fi
 }
 
+# 检查开机自启状态
+_check_autostart() {
+    _info "--- 检查开机自启状态 ---"
+    case "$INIT_SYSTEM" in
+        systemd)
+            if systemctl is-enabled sing-box &>/dev/null; then
+                _success "sing-box 已设置为开机自启"
+            else
+                _warning "sing-box 未设置为开机自启"
+                read -p "是否启用开机自启? (y/N): " enable_auto
+                if [[ "$enable_auto" == "y" || "$enable_auto" == "Y" ]]; then
+                    systemctl enable sing-box
+                    _success "已启用开机自启"
+                fi
+            fi
+            
+            if systemctl is-enabled acme-renew.timer &>/dev/null 2>&1; then
+                _success "证书续期服务已设置为开机自启"
+            fi
+            ;;
+        openrc)
+            if rc-update show | grep -q "sing-box.*default"; then
+                _success "sing-box 已设置为开机自启"
+            else
+                _warning "sing-box 未设置为开机自启"
+                read -p "是否启用开机自启? (y/N): " enable_auto
+                if [[ "$enable_auto" == "y" || "$enable_auto" == "Y" ]]; then
+                    rc-update add sing-box default
+                    _success "已启用开机自启"
+                fi
+            fi
+            ;;
+        direct)
+            _warning "直接管理模式下不支持开机自启"
+            ;;
+    esac
+}
+
 _main_menu() {
     while true; do
         clear
@@ -895,11 +983,12 @@ _main_menu() {
         echo "----------------------------------------------------"
         _info "【更新与维护】"
         echo "  5) 更新 sing-box 程序"
+        echo "  6) 检查开机自启状态"
         echo "----------------------------------------------------"
-        echo "  6) 卸载 sing-box 及脚本"
+        echo "  7) 卸载 sing-box 及脚本"
         echo "  0) 退出脚本"
         echo "===================================================="
-        read -p "请输入选项 [0-6]: " choice
+        read -p "请输入选项 [0-7]: " choice
 
         case $choice in
             1) _add_trojan_ws_tls; [ $? -eq 0 ] && _manage_service "restart" ;;
@@ -907,7 +996,8 @@ _main_menu() {
             3) _delete_node ;;
             4) _modify_node ;;
             5) _update_sing_box ;;
-            6) _uninstall ;;
+            6) _check_autostart ;;
+            7) _uninstall ;;
             0) exit 0 ;;
             *) _error "无效输入，请重试。" ;;
         esac
