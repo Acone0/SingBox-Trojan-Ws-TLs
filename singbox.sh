@@ -255,7 +255,7 @@ _check_autostart() {
       systemctl is-enabled acme-renew.timer &>/dev/null && _success "timer 已自启" || _warning "timer 未自启"
       ;;
     openrc)
-      rc-update show | grep -q sing-box && _success "sing-box 已自启" || { _warning "未自启"; read -p "启用自启？(y/N)" e; [[ $e == y|Y ]] && rc-update add sing-box default; }
+      rc-update show | grep -q sing-box && _success "sing-box 已自启" || { _warning "未自启"; read -p "启用自启？(y/N)" e; [[ $e == y || $e == Y ]] && rc-update add sing-box default; }
       ;;
     *) _warning "直接模式无自启" ;;
   esac
